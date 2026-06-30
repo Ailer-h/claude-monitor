@@ -3,6 +3,7 @@ import ctypes
 import os
 
 from claude_monitor import STATUS_WORKING, STATUS_WAITING
+from json_tools import get_dict
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
 OFFSET_X = 14
@@ -23,17 +24,22 @@ def _expanded_height(n_sessions: int) -> int:
     return HEADER_H + GAP + n * ROW_H + GAP + INFO_H + BAR_H + PAD_BOT
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-BG        = "#1A1F2E"
-BORDER    = "#2D3748"
-GREEN     = "#10B981"
-YELLOW    = "#F59E0B"
-RED       = "#EF4444"
-TEXT_PRI  = "#E2E8F0"
-TEXT_DIM  = "#64748B"
-BAR_BG    = "#2D3748"
-FONT      = ("Segoe UI", 9)
-FONT_BOLD = ("Segoe UI", 9, "bold")
-FONT_SM   = ("Segoe UI", 8)
+
+stylesheet = get_dict("style.json")
+
+BG           = stylesheet.get("BG")
+BORDER       = stylesheet.get("BORDER")
+GREEN        = stylesheet.get("GREEN")
+YELLOW       = stylesheet.get("YELLOW")
+RED          = stylesheet.get("RED")
+TEXT_PRI     = stylesheet.get("TEXT_PRI")
+TEXT_DIM     = stylesheet.get("TEXT_DIM")
+BAR_BG       = stylesheet.get("BAR_BG")
+FONT         = (stylesheet.get("FONT").get("font-face"), stylesheet.get("FONT").get("font-size"))
+FONT_BOLD    = (stylesheet.get("FONT_BOLD").get("font-face"), stylesheet.get("FONT_BOLD").get("font-size"), "bold")
+FONT_SM      = (stylesheet.get("FONT_SM").get("font-face"), stylesheet.get("FONT_SM").get("font-size"))
+ALPHA_IDLE   = stylesheet.get("ALPHA_IDLE")
+ALPHA_ACTIVE = stylesheet.get("ALPHA_ACTIVE")
 
 # ── Windows API ───────────────────────────────────────────────────────────────
 GWL_EXSTYLE       = -20
@@ -41,6 +47,24 @@ WS_EX_LAYERED     = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW  = 0x00000080
 
+
+def reload_stylesheet() -> None:
+    global BG, BORDER, GREEN, YELLOW, RED, TEXT_PRI, TEXT_DIM, BAR_BG
+    global FONT, FONT_BOLD, FONT_SM, ALPHA_IDLE, ALPHA_ACTIVE
+    s = get_dict("style.json")
+    BG           = s.get("BG")
+    BORDER       = s.get("BORDER")
+    GREEN        = s.get("GREEN")
+    YELLOW       = s.get("YELLOW")
+    RED          = s.get("RED")
+    TEXT_PRI     = s.get("TEXT_PRI")
+    TEXT_DIM     = s.get("TEXT_DIM")
+    BAR_BG       = s.get("BAR_BG")
+    FONT         = (s.get("FONT").get("font-face"), s.get("FONT").get("font-size"))
+    FONT_BOLD    = (s.get("FONT_BOLD").get("font-face"), s.get("FONT_BOLD").get("font-size"), "bold")
+    FONT_SM      = (s.get("FONT_SM").get("font-face"), s.get("FONT_SM").get("font-size"))
+    ALPHA_IDLE   = s.get("ALPHA_IDLE")
+    ALPHA_ACTIVE = s.get("ALPHA_ACTIVE")
 
 def _get_cursor_pos() -> tuple[int, int]:
     class POINT(ctypes.Structure):
@@ -67,11 +91,14 @@ class Overlay(tk.Toplevel):
         self._visible     = True
         self._pinned      = False
         self._hwnd        = None
+        self._quit_fn     = None            # set by caller to also stop the tray
         self._pin_btn     = (0, 0, 0, 0)   # x1 y1 x2 y2, updated each draw
+        self._hide_btn    = (0, 0, 0, 0)
+        self._quit_btn    = (0, 0, 0, 0)
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.attributes("-alpha", 0.93)
+        self.attributes("-alpha", ALPHA_IDLE)
         self.configure(bg=BG)
 
         self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0, bd=0,
@@ -125,10 +152,19 @@ class Overlay(tk.Toplevel):
         else:
             self.withdraw()
 
+    def reload_style(self):
+        reload_stylesheet()
+        self.configure(bg=BG)
+        self.canvas.configure(bg=BG)
+        alpha = ALPHA_ACTIVE if self._expanded else ALPHA_IDLE
+        self.attributes("-alpha", alpha)
+        self._draw()
+
     # ── Expand / collapse ─────────────────────────────────────────────────────
 
     def _expand(self):
         self._expanded = True
+        self.attributes("-alpha", ALPHA_ACTIVE)
         sessions = self._monitor.sessions
         eh = _expanded_height(len(sessions))
         self._set_geometry(EW, eh)
@@ -136,6 +172,7 @@ class Overlay(tk.Toplevel):
 
     def _collapse(self):
         self._expanded = False
+        self.attributes("-alpha", ALPHA_IDLE)
         self._set_geometry(CW, CH)
         self._draw()
 
@@ -223,18 +260,44 @@ class Overlay(tk.Toplevel):
         c.create_text(13, HEADER_H // 2 + 2, text="Claude Usage",
                       anchor="w", fill=TEXT_PRI, font=FONT_BOLD)
 
-        # Pin button (top-right of header)
-        btn_label = "Unpin" if self._pinned else "Pin"
-        btn_x2 = W - 8
-        btn_x1 = btn_x2 - 38
+        # Header buttons (top-right): [Quit] [Hide] [Pin/Unpin]
+        BTN_W = 38
+        BTN_GAP = 10
         btn_y1 = 6
         btn_y2 = HEADER_H - 6
-        self._pin_btn = (btn_x1, btn_y1, btn_x2, btn_y2)
-        btn_color = "#3B4A6B" if self._pinned else "#2D3748"
-        c.create_rectangle(btn_x1, btn_y1, btn_x2, btn_y2,
-                           fill=btn_color, outline=BORDER, width=1)
-        c.create_text((btn_x1 + btn_x2) // 2, (btn_y1 + btn_y2) // 2,
-                      text=btn_label, fill=TEXT_PRI, font=FONT_SM)
+        mid_y = (btn_y1 + btn_y2) // 2
+
+        BTN_FILL        = BAR_BG          # #1a1a1a — resting state
+        BTN_FILL_ACTIVE = "#2a2a2a"       # slightly lifted for pinned state
+
+        # Pin button (rightmost)
+        pin_x2 = W - 8
+        pin_x1 = pin_x2 - BTN_W
+        self._pin_btn = (pin_x1, btn_y1, pin_x2, btn_y2)
+        pin_color = BTN_FILL_ACTIVE if self._pinned else BTN_FILL
+        c.create_rectangle(pin_x1, btn_y1, pin_x2, btn_y2,
+                           fill=pin_color, outline=BORDER, width=1)
+        c.create_text((pin_x1 + pin_x2) // 2, mid_y,
+                      text="Unpin" if self._pinned else "Pin",
+                      fill=TEXT_PRI, font=FONT_SM)
+
+        # Hide button
+        hide_x2 = pin_x1 - BTN_GAP
+        hide_x1 = hide_x2 - BTN_W
+        self._hide_btn = (hide_x1, btn_y1, hide_x2, btn_y2)
+        c.create_rectangle(hide_x1, btn_y1, hide_x2, btn_y2,
+                           fill=BTN_FILL, outline=BORDER, width=1)
+        c.create_text((hide_x1 + hide_x2) // 2, mid_y,
+                      text="Hide", fill=TEXT_PRI, font=FONT_SM)
+
+        # Quit button
+        quit_x2 = hide_x1 - BTN_GAP
+        quit_x1 = quit_x2 - BTN_W
+        self._quit_btn = (quit_x1, btn_y1, quit_x2, btn_y2)
+        c.create_rectangle(quit_x1, btn_y1, quit_x2, btn_y2,
+                           fill=BTN_FILL, outline=BORDER, width=1)
+        c.create_text((quit_x1 + quit_x2) // 2, mid_y,
+                      text="Quit", fill=TEXT_PRI, font=FONT_SM)
 
         # Session rows
         row_y_start = HEADER_H + GAP
@@ -290,6 +353,22 @@ class Overlay(tk.Toplevel):
                       anchor="w", fill=TEXT_PRI, font=FONT)
 
     def _on_canvas_click(self, event):
+        # Quit button
+        qx1, qy1, qx2, qy2 = self._quit_btn
+        if qx1 <= event.x <= qx2 and qy1 <= event.y <= qy2:
+            if self._quit_fn:
+                self._quit_fn()
+            else:
+                self._root.destroy()
+            return
+
+        # Hide button
+        hx1, hy1, hx2, hy2 = self._hide_btn
+        if hx1 <= event.x <= hx2 and hy1 <= event.y <= hy2:
+            self.toggle_visible()
+            return
+
+        # Pin button
         x1, y1, x2, y2 = self._pin_btn
         if x1 <= event.x <= x2 and y1 <= event.y <= y2:
             self._pinned = not self._pinned

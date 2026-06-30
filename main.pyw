@@ -21,6 +21,12 @@ def main():
     tray = TrayIcon(overlay, monitor)
     tray.run()                # non-blocking via run_detached()
 
+    def _quit():
+        tray._icon.stop()
+        root.destroy()
+
+    overlay._quit_fn = _quit
+
     try:
         root.mainloop()
     finally:

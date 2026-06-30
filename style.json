@@ -1,0 +1,29 @@
+{
+    "BG": "#0d0d0d",
+    "BORDER": "#262626",
+    "GREEN": "#138a36",
+    "YELLOW": "#ffb620",
+    "RED": "#DD1C1A",
+    "TEXT_PRI": "#f1f1f1",
+    "TEXT_DIM": "#cacaca",
+    "BAR_BG": "#1a1a1a",
+
+    "FONT": {
+        "font-face": "Mozilla Text",
+        "font-size": 9,
+        "font-weight": ""
+    },
+    "FONT_BOLD":{
+        "font-face": "Mozilla Text",
+        "font-size": 9,
+        "font-weight": "bold"
+    },
+    "FONT_SM": {
+        "font-face": "Mozilla Text",
+        "font-size": 8,
+        "font-weight": ""
+    },
+
+    "ALPHA_IDLE": 0.6,
+    "ALPHA_ACTIVE": 0.93
+}

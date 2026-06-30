@@ -3,13 +3,22 @@ from PIL import Image, ImageDraw
 import pystray
 
 from claude_monitor import STATUS_DONE, STATUS_WORKING, STATUS_WAITING
+from json_tools import get_dict
 
-_STATUS_COLORS = {
-    STATUS_DONE:    (16, 185, 129),   # emerald green
-    STATUS_WORKING: (245, 158, 11),   # amber
-    STATUS_WAITING: (239, 68, 68),    # red
-}
 
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+def _load_status_colors() -> dict:
+    s = get_dict("style.json")
+    return {
+        STATUS_DONE:    _hex_to_rgb(s.get("GREEN")),
+        STATUS_WORKING: _hex_to_rgb(s.get("YELLOW")),
+        STATUS_WAITING: _hex_to_rgb(s.get("RED")),
+    }
+
+_STATUS_COLORS = _load_status_colors()
 
 def _make_icon_image(status: str) -> Image.Image:
     color = _STATUS_COLORS.get(status, _STATUS_COLORS[STATUS_DONE])
@@ -29,6 +38,7 @@ class TrayIcon:
 
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._on_toggle, default=True),
+            pystray.MenuItem("Reload Style", self._on_reload_style),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._on_quit),
         )
@@ -46,8 +56,17 @@ class TrayIcon:
     def run(self):
         self._icon.run_detached()
 
+    def reload_style(self):
+        global _STATUS_COLORS
+        _STATUS_COLORS = _load_status_colors()
+        self._icon.icon = _make_icon_image(self._monitor.status)
+
     def _on_toggle(self, icon, item):
         self._overlay.after(0, self._overlay.toggle_visible)
+
+    def _on_reload_style(self, icon, item):
+        self.reload_style()
+        self._overlay.after(0, self._overlay.reload_style)
 
     def _on_quit(self, icon, item):
         icon.stop()
