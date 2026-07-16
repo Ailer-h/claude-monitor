@@ -3,7 +3,7 @@ import ctypes
 import os
 
 from claude_monitor import STATUS_WORKING, STATUS_WAITING
-from json_tools import get_dict
+from json_tools import get_dict, save_dict
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
 OFFSET_X = 14
@@ -12,16 +12,68 @@ CW, CH   = 172, 42   # collapsed (fixed)
 EW       = 400        # expanded width (fixed)
 # expanded height computed dynamically from session count
 
-ROW_H    = 26         # pixels per session row
-HEADER_H = 28         # "Claude Usage" title
-GAP      = 6          # spacing between sections
-INFO_H   = 22         # usage % + reset text row
-BAR_H    = 14         # progress bar row
-PAD_BOT  = 10
+# ── Position ──────────────────────────────────────────────────────────────────
+POS_TOP_LEFT     = "top-left"
+POS_TOP_RIGHT    = "top-right"
+POS_BOTTOM_LEFT  = "bottom-left"
+POS_BOTTOM_RIGHT = "bottom-right"
+POS_DRAGGABLE    = "draggable"
+
+HANDLE_SIZE   = 10  # grip box side length
+HANDLE_MARGIN = 3   # gap from the top/right window edges
+
+_CONFIG_PATH = "config.json"
+
+
+def _load_position_config() -> tuple[str, int | None, int | None]:
+    cfg = get_dict(_CONFIG_PATH)
+    mode = cfg.get("POSITION_MODE", POS_TOP_LEFT)
+    return mode, cfg.get("POS_X"), cfg.get("POS_Y")
+
+
+def _save_position_config(mode: str, x: int | None, y: int | None) -> None:
+    save_dict(_CONFIG_PATH, {"POSITION_MODE": mode, "POS_X": x, "POS_Y": y})
+
+ROW_H         = 26    # pixels per session row
+HEADER_H      = 28    # "Claude Usage" title
+GAP           = 6     # spacing between sections
+INFO_H        = 22    # usage % + reset text row
+BAR_H         = 14    # progress bar row
+SESSION_GAP   = 4     # vertical gap between the main bar and the session bar
+SESSION_BAR_H = 2      # session-window progress bar row
+PAD_BOT       = 10
+
+SESSION_WINDOW_MIN = 5 * 60  # 5h session window, in minutes
+
+# ── Mascot (Clawd) ───────────────────────────────────────────────────────────
+# Pixel-grid rectangles lifted from the official Claude Code "clawd" mark
+# (VS Code extension resources/clawd.svg), native viewBox 47x38.
+CLAWD_W, CLAWD_H = 47, 38
+CLAWD_RECTS = [
+    (5.082, 0.938, 9.374, 10.077), (9.233, 0.938, 13.525, 10.077),
+    (13.384, 0.938, 17.677, 10.077), (17.535, 0.938, 21.828, 10.077),
+    (21.686, 0.938, 25.979, 10.077), (25.838, 0.938, 30.13, 10.077),
+    (29.989, 0.938, 34.281, 10.077), (34.14, 0.938, 38.432, 10.077),
+    (38.291, 0.938, 42.583, 10.077),
+    (0.931, 9.938, 5.223, 19.077), (5.082, 9.938, 9.374, 19.077),
+    (9.233, 14.508, 13.525, 19.077), (13.384, 9.938, 17.677, 19.077),
+    (17.535, 9.938, 21.828, 19.077), (21.686, 9.938, 25.979, 19.077),
+    (25.838, 9.938, 30.13, 19.077), (29.989, 9.938, 34.281, 19.077),
+    (34.14, 14.508, 38.432, 19.077), (38.291, 9.938, 42.583, 19.077),
+    (42.442, 9.938, 46.734, 19.077),
+    (5.082, 18.939, 9.374, 28.077), (9.233, 18.939, 13.525, 28.077),
+    (13.384, 18.939, 17.677, 28.077), (17.535, 18.939, 21.828, 28.077),
+    (21.686, 18.939, 25.979, 28.077), (25.838, 18.939, 30.13, 28.077),
+    (29.989, 18.939, 34.281, 28.077), (34.14, 18.939, 38.432, 28.077),
+    (38.291, 18.939, 42.583, 28.077),
+    (5.082, 27.939, 9.374, 37.077), (13.384, 27.939, 17.677, 37.077),
+    (29.989, 27.939, 34.281, 37.077), (38.291, 27.939, 42.583, 37.077),
+]
 
 def _expanded_height(n_sessions: int) -> int:
     n = max(n_sessions, 1)
-    return HEADER_H + GAP + n * ROW_H + GAP + INFO_H + BAR_H + PAD_BOT
+    return (HEADER_H + GAP + n * ROW_H + GAP + INFO_H + BAR_H
+            + SESSION_GAP + SESSION_BAR_H + PAD_BOT)
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -32,9 +84,11 @@ BORDER       = stylesheet.get("BORDER")
 GREEN        = stylesheet.get("GREEN")
 YELLOW       = stylesheet.get("YELLOW")
 RED          = stylesheet.get("RED")
+GREY         = stylesheet.get("GREY")
 TEXT_PRI     = stylesheet.get("TEXT_PRI")
 TEXT_DIM     = stylesheet.get("TEXT_DIM")
 BAR_BG       = stylesheet.get("BAR_BG")
+SESSION_BAR  = stylesheet.get("SESSION_BAR")
 FONT         = (stylesheet.get("FONT").get("font-face"), stylesheet.get("FONT").get("font-size"))
 FONT_BOLD    = (stylesheet.get("FONT_BOLD").get("font-face"), stylesheet.get("FONT_BOLD").get("font-size"), "bold")
 FONT_SM      = (stylesheet.get("FONT_SM").get("font-face"), stylesheet.get("FONT_SM").get("font-size"))
@@ -49,7 +103,7 @@ WS_EX_TOOLWINDOW  = 0x00000080
 
 
 def reload_stylesheet() -> None:
-    global BG, BORDER, GREEN, YELLOW, RED, TEXT_PRI, TEXT_DIM, BAR_BG
+    global BG, BORDER, GREEN, YELLOW, RED, GREY, TEXT_PRI, TEXT_DIM, BAR_BG, SESSION_BAR
     global FONT, FONT_BOLD, FONT_SM, ALPHA_IDLE, ALPHA_ACTIVE
     s = get_dict("style.json")
     BG           = s.get("BG")
@@ -57,9 +111,11 @@ def reload_stylesheet() -> None:
     GREEN        = s.get("GREEN")
     YELLOW       = s.get("YELLOW")
     RED          = s.get("RED")
+    GREY         = s.get("GREY")
     TEXT_PRI     = s.get("TEXT_PRI")
     TEXT_DIM     = s.get("TEXT_DIM")
     BAR_BG       = s.get("BAR_BG")
+    SESSION_BAR  = s.get("SESSION_BAR")
     FONT         = (s.get("FONT").get("font-face"), s.get("FONT").get("font-size"))
     FONT_BOLD    = (s.get("FONT_BOLD").get("font-face"), s.get("FONT_BOLD").get("font-size"), "bold")
     FONT_SM      = (s.get("FONT_SM").get("font-face"), s.get("FONT_SM").get("font-size"))
@@ -74,7 +130,17 @@ def _get_cursor_pos() -> tuple[int, int]:
     return pt.x, pt.y
 
 
-def _status_color(status: str) -> str:
+def _draw_clawd(c, x0: float, y0: float, scale: float, color: str | None = None) -> None:
+    fill = color or SESSION_BAR
+    for x1, y1, x2, y2 in CLAWD_RECTS:
+        c.create_rectangle(x0 + x1 * scale, y0 + y1 * scale,
+                           x0 + x2 * scale, y0 + y2 * scale,
+                           fill=fill, outline="")
+
+
+def _status_color(status: str, has_sessions: bool = True) -> str:
+    if not has_sessions:
+        return GREY
     if status == STATUS_WAITING:
         return RED
     if status == STATUS_WORKING:
@@ -95,6 +161,12 @@ class Overlay(tk.Toplevel):
         self._pin_btn     = (0, 0, 0, 0)   # x1 y1 x2 y2, updated each draw
         self._hide_btn    = (0, 0, 0, 0)
         self._quit_btn    = (0, 0, 0, 0)
+
+        self._position_mode, self._pos_x, self._pos_y = _load_position_config()
+        if self._pos_x is None or self._pos_y is None:
+            self._pos_x, self._pos_y = OFFSET_X, OFFSET_Y
+        self._drag_offset = (0, 0)
+        self._cur_w, self._cur_h = CW, CH
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -177,8 +249,37 @@ class Overlay(tk.Toplevel):
         self._draw()
 
     def _set_geometry(self, w, h):
+        if self._position_mode == POS_DRAGGABLE:
+            # Keep the top-right corner anchored: shift the left edge left/right
+            # as the width changes instead of growing from the top-left corner.
+            self._pos_x += self._cur_w - w
         self.canvas.config(width=w, height=h)
-        self.geometry(f"{w}x{h}+{OFFSET_X}+{OFFSET_Y}")
+        self._cur_w, self._cur_h = w, h
+        x, y = self._compute_position(w, h)
+        self._pos_x, self._pos_y = x, y
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _compute_position(self, w, h):
+        if self._position_mode == POS_DRAGGABLE:
+            return self._pos_x, self._pos_y
+
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        if self._position_mode == POS_TOP_RIGHT:
+            return sw - w - OFFSET_X, OFFSET_Y
+        if self._position_mode == POS_BOTTOM_LEFT:
+            return OFFSET_X, sh - h - OFFSET_Y
+        if self._position_mode == POS_BOTTOM_RIGHT:
+            return sw - w - OFFSET_X, sh - h - OFFSET_Y
+        return OFFSET_X, OFFSET_Y  # top-left (default)
+
+    # ── Position mode (called from the tray) ─────────────────────────────────
+
+    def set_position_mode(self, mode):
+        self._position_mode = mode
+        self._set_geometry(self._cur_w, self._cur_h)
+        _save_position_config(self._position_mode, self._pos_x, self._pos_y)
+        self._draw()
 
     # ── Hover polling ─────────────────────────────────────────────────────────
 
@@ -227,26 +328,78 @@ class Overlay(tk.Toplevel):
         if self._expanded:
             self._draw_expanded(c, sessions, usage, reset_m)
         else:
-            self._draw_collapsed(c, status, usage)
+            self._draw_collapsed(c, status, usage, reset_m, bool(sessions))
+
+        if self._position_mode == POS_DRAGGABLE:
+            self._draw_drag_handle(c)
+
+    # ── Drag handle ───────────────────────────────────────────────────────────
+
+    def _drag_handle_bounds(self):
+        x2 = self._cur_w - HANDLE_MARGIN
+        x1 = x2 - HANDLE_SIZE
+        y1 = HANDLE_MARGIN
+        y2 = y1 + HANDLE_SIZE
+        return x1, y1, x2, y2
+
+    def _draw_drag_handle(self, c):
+        x1, y1, x2, y2 = self._drag_handle_bounds()
+        c.create_rectangle(x1, y1, x2, y2, fill=BAR_BG, outline=BORDER, width=1)
+        for i in range(2):
+            for j in range(2):
+                cx = x1 + 3 + i * 4
+                cy = y1 + 3 + j * 4
+                c.create_oval(cx - 1, cy - 1, cx + 1, cy + 1, fill=TEXT_DIM, outline="")
+
+    def _start_drag(self, event):
+        self._drag_offset = (event.x, event.y)
+        self.canvas.bind("<B1-Motion>", self._on_drag_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._on_drag_release)
+
+    def _on_drag_motion(self, event):
+        dx, dy = self._drag_offset
+        self._pos_x = self.winfo_pointerx() - dx
+        self._pos_y = self.winfo_pointery() - dy
+        self.geometry(f"+{self._pos_x}+{self._pos_y}")
+
+    def _on_drag_release(self, event):
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        _save_position_config(self._position_mode, self._pos_x, self._pos_y)
 
     # ── Collapsed ─────────────────────────────────────────────────────────────
 
-    def _draw_collapsed(self, c, status, usage):
+    def _draw_collapsed(self, c, status, usage, reset_m, has_sessions):
         W, H = CW, CH
         c.create_rectangle(0, 0, W, H, fill=BG, outline=BORDER)
 
-        dot_x, dot_y, dot_r = 16, H // 2, 6
+        COLLAPSED_BAR_H = 8
+        block_h = COLLAPSED_BAR_H + SESSION_GAP + SESSION_BAR_H
+        by1 = (H - block_h) // 2
+        by2 = by1 + COLLAPSED_BAR_H
+        sby1 = by2 + SESSION_GAP
+        sby2 = sby1 + SESSION_BAR_H
+
+        dot_x, dot_y, dot_r = 16, (by1 + by2) // 2, 6
         c.create_oval(dot_x - dot_r, dot_y - dot_r,
                       dot_x + dot_r, dot_y + dot_r,
-                      fill=_status_color(status), outline="")
+                      fill=_status_color(status, has_sessions), outline="")
 
         bx1, bx2 = 30, W - 10
-        by1, by2 = H // 2 - 4, H // 2 + 4
         c.create_rectangle(bx1, by1, bx2, by2, fill=BAR_BG, outline="")
         if usage > 0:
             fx2 = bx1 + int((bx2 - bx1) * min(usage, 1.0))
             c.create_rectangle(bx1, by1, fx2, by2,
                                fill=self._bar_color(usage), outline="")
+
+        # Session-window bar (how much of the 5h window is left)
+        c.create_rectangle(bx1, sby1, bx2, sby2, fill=BAR_BG, outline="")
+        remaining = reset_m / SESSION_WINDOW_MIN
+        remaining = max(0.0, min(remaining, 1.0))
+        if remaining > 0:
+            fx2 = bx1 + int((bx2 - bx1) * remaining)
+            c.create_rectangle(bx1, sby1, fx2, sby2,
+                               fill=SESSION_BAR, outline="")
 
     # ── Expanded ──────────────────────────────────────────────────────────────
 
@@ -256,8 +409,16 @@ class Overlay(tk.Toplevel):
 
         c.create_rectangle(0, 0, W, H, fill=BG, outline=BORDER)
 
-        # Title
-        c.create_text(13, HEADER_H // 2 + 2, text="Claude Usage",
+        # Mascot + title (share one vertical center so they align)
+        title_y = HEADER_H // 2 + 2
+        MASCOT_SCALE = 0.5
+        mascot_w = CLAWD_W * MASCOT_SCALE
+        mascot_h = CLAWD_H * MASCOT_SCALE
+        mascot_x = 13
+        mascot_y = title_y - mascot_h / 2
+        _draw_clawd(c, mascot_x, mascot_y, MASCOT_SCALE)
+
+        c.create_text(mascot_x + mascot_w + 7, title_y, text="Claude Usage",
                       anchor="w", fill=TEXT_PRI, font=FONT_BOLD)
 
         # Header buttons (top-right): [Quit] [Hide] [Pin/Unpin]
@@ -270,8 +431,11 @@ class Overlay(tk.Toplevel):
         BTN_FILL        = BAR_BG          # #1a1a1a — resting state
         BTN_FILL_ACTIVE = "#2a2a2a"       # slightly lifted for pinned state
 
+        # Leave room for the drag handle in the top-right corner, if shown
+        handle_reserve = (HANDLE_MARGIN + HANDLE_SIZE + 6) if self._position_mode == POS_DRAGGABLE else 0
+
         # Pin button (rightmost)
-        pin_x2 = W - 8
+        pin_x2 = W - 8 - handle_reserve
         pin_x1 = pin_x2 - BTN_W
         self._pin_btn = (pin_x1, btn_y1, pin_x2, btn_y2)
         pin_color = BTN_FILL_ACTIVE if self._pinned else BTN_FILL
@@ -308,8 +472,13 @@ class Overlay(tk.Toplevel):
             for i, sess in enumerate(sessions):
                 self._draw_session_row(c, row_y_start + i * ROW_H, sess)
 
-        # Usage info
-        info_y = H - PAD_BOT - BAR_H - INFO_H + INFO_H // 2
+        # Progress bar geometry (anchored above the session bar, from the bottom)
+        bx1, bx2 = 13, W - 13
+        by1 = H - PAD_BOT - SESSION_GAP - SESSION_BAR_H - BAR_H
+        by2 = by1 + BAR_H
+
+        # Usage info (kept anchored directly above the main bar)
+        info_y = by1 - INFO_H + INFO_H // 2
         pct_str = f"{int(usage * 100)}%"
         if reset_m >= 60:
             reset_str = f"Reset in {reset_m // 60}h {reset_m % 60:02d}m"
@@ -325,14 +494,22 @@ class Overlay(tk.Toplevel):
                       fill=TEXT_DIM, font=FONT_SM)
 
         # Progress bar
-        bx1, bx2 = 13, W - 13
-        by1 = H - PAD_BOT - BAR_H
-        by2 = H - PAD_BOT
         c.create_rectangle(bx1, by1, bx2, by2, fill=BAR_BG, outline="")
         if usage > 0:
             fx2 = bx1 + int((bx2 - bx1) * min(usage, 1.0))
             c.create_rectangle(bx1, by1, fx2, by2,
                                fill=self._bar_color(usage), outline="")
+
+        # Session-window progress bar (how much of the 5h window is left)
+        sby1 = by2 + SESSION_GAP
+        sby2 = sby1 + SESSION_BAR_H
+        c.create_rectangle(bx1, sby1, bx2, sby2, fill=BAR_BG, outline="")
+        remaining = reset_m / SESSION_WINDOW_MIN
+        remaining = max(0.0, min(remaining, 1.0))
+        if remaining > 0:
+            fx2 = bx1 + int((bx2 - bx1) * remaining)
+            c.create_rectangle(bx1, sby1, fx2, sby2,
+                               fill=SESSION_BAR, outline="")
 
     def _draw_session_row(self, c, y, sess):
         """Single dot (status color) + session name + status label."""
@@ -353,6 +530,13 @@ class Overlay(tk.Toplevel):
                       anchor="w", fill=TEXT_PRI, font=FONT)
 
     def _on_canvas_click(self, event):
+        # Drag handle
+        if self._position_mode == POS_DRAGGABLE:
+            x1, y1, x2, y2 = self._drag_handle_bounds()
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                self._start_drag(event)
+                return
+
         # Quit button
         qx1, qy1, qx2, qy2 = self._quit_btn
         if qx1 <= event.x <= qx2 and qy1 <= event.y <= qy2:

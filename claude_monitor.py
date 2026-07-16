@@ -25,6 +25,7 @@ STATUS_WAITING = "waiting"
 _USAGE_URL = "https://claude.ai/api/oauth/usage"
 _USAGE_TTL = 30
 _CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
+_DASHBOARD_STATE_PATH = Path.home() / ".claude" / "dashboard_state.json"
 
 _ENTRYPOINT_NAMES = {
     "claude-vscode":    "Claude Code (VSCode)",
@@ -71,6 +72,44 @@ def _find_session_jsonl(session_id: str, cwd: str) -> Path | None:
     return None
 
 
+def _load_dashboard_state() -> dict:
+    """session_id -> epoch timestamp of the last Notification hook firing."""
+    try:
+        return json.loads(_DASHBOARD_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _last_message_is_question(jsonl: Path) -> bool:
+    """Return True if the last assistant message in the JSONL ends with a question."""
+    try:
+        with jsonl.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 8192))
+            tail = f.read().decode("utf-8", errors="replace")
+        last_line = None
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if line:
+                last_line = line
+                break
+        if not last_line:
+            return False
+        entry = json.loads(last_line)
+        if entry.get("type") != "assistant":
+            return False
+        msg = entry.get("message", {})
+        if msg.get("stop_reason") != "end_turn":
+            return False
+        for block in reversed(msg.get("content", [])):
+            if block.get("type") == "text":
+                return "?" in block.get("text", "")[-500:]
+        return False
+    except Exception:
+        return False
+
+
 def _session_status_from_jsonl(session: dict) -> str:
     """Determine Claude Code session state via PID liveness + JSONL mtime."""
     pid = session.get("pid")
@@ -89,23 +128,53 @@ def _session_status_from_jsonl(session: dict) -> str:
         return STATUS_DONE
 
     jsonl = _find_session_jsonl(session_id, cwd)
-    if not jsonl:
+    jsonl_mtime = 0.0
+    if jsonl:
+        try:
+            jsonl_mtime = jsonl.stat().st_mtime
+        except Exception:
+            pass
+
+    # The Notification hook (hooks/notify_waiting.py) records a timestamp when
+    # Claude is blocked on a permission prompt or idle-waiting nudge. It wins
+    # over everything else unless newer JSONL activity shows the conversation
+    # has already moved on (no separate "clear" signal needed).
+    # Grace of 10 s: the Notification hook fires just before the JSONL is
+    # flushed, so notify_ts can be slightly older than jsonl_mtime.
+    NOTIFY_GRACE = 10
+    notify_ts = _load_dashboard_state().get(session_id)
+    if notify_ts and notify_ts + NOTIFY_GRACE >= jsonl_mtime:
         return STATUS_WAITING
 
-    try:
-        age = time.time() - jsonl.stat().st_mtime
-        if age < 15:
-            return STATUS_WORKING
-    except Exception:
-        pass
+    if jsonl_mtime and time.time() - jsonl_mtime < 15:
+        return STATUS_WORKING
 
-    # No recent JSONL writes → idle.
-    # WAITING (red) requires an explicit dashboard_state.json hook signal.
+    # Process alive, JSONL is idle — check if Claude's last message was a
+    # question; if so it is waiting for the user's answer, otherwise it is done.
+    if jsonl and _last_message_is_question(jsonl):
+        return STATUS_WAITING
+
     return STATUS_DONE
 
 
 # ── Claude Desktop (Cowork) detection ────────────────────────────────────────
 
+
+def _known_session_ids() -> set:
+    """Return session IDs from ~/.claude/sessions/*.json (CLI/VSCode sessions)."""
+    result = set()
+    sessions_dir = Path.home() / ".claude" / "sessions"
+    if not sessions_dir.exists():
+        return result
+    for f in sessions_dir.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            sid = data.get("sessionId")
+            if sid:
+                result.add(sid)
+        except Exception:
+            pass
+    return result
 
 
 def _desktop_main_pid() -> int | None:
@@ -129,12 +198,14 @@ def _cowork_status() -> str | None:
 
     Cowork spawns an embedded claude.exe child (with --output-format stream-json)
     for the duration of each task and terminates it when done.
-    Child present → WORKING; no child → DONE (idle).
+    Child present → check for WAITING via notification hook, else WORKING.
+    No child → DONE (idle).
     """
     main_pid = _desktop_main_pid()
     if not main_pid:
         return None
 
+    child_found = False
     for proc in psutil.process_iter(["pid", "name", "cmdline", "ppid"]):
         try:
             if proc.info["ppid"] != main_pid:
@@ -142,11 +213,39 @@ def _cowork_status() -> str | None:
             name = (proc.info["name"] or "").lower()
             cmd  = " ".join(proc.info["cmdline"] or [])
             if "claude" in name and "--output-format" in cmd:
-                return STATUS_WORKING
+                child_found = True
+                break
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
-    return STATUS_DONE
+    if not child_found:
+        return STATUS_DONE
+
+    # Cowork sessions fire the Notification hook (loads user settings) but don't
+    # write a file to ~/.claude/sessions/. Find "orphan" notifications — session
+    # IDs in dashboard_state.json with no matching session file — and apply the
+    # same JSONL-mtime check used for CLI/VSCode sessions.
+    known_ids = _known_session_ids()
+    dashboard = _load_dashboard_state()
+    now = time.time()
+    MAX_NOTIFY_AGE = 300  # ignore notifications older than 5 minutes
+    NOTIFY_GRACE = 10
+    for session_id, notify_ts in dashboard.items():
+        if session_id in known_ids:
+            continue
+        if now - notify_ts > MAX_NOTIFY_AGE:
+            continue
+        jsonl = _find_session_jsonl(session_id, "")
+        if not jsonl:
+            continue
+        try:
+            jsonl_mtime = jsonl.stat().st_mtime
+        except Exception:
+            continue
+        if notify_ts + NOTIFY_GRACE >= jsonl_mtime:
+            return STATUS_WAITING
+
+    return STATUS_WORKING
 
 
 class ClaudeMonitor:

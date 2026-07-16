@@ -4,6 +4,17 @@ import pystray
 
 from claude_monitor import STATUS_DONE, STATUS_WORKING, STATUS_WAITING
 from json_tools import get_dict
+from overlay import (
+    POS_TOP_LEFT, POS_TOP_RIGHT, POS_BOTTOM_LEFT, POS_BOTTOM_RIGHT, POS_DRAGGABLE,
+)
+
+_POSITION_LABELS = (
+    ("Top Left", POS_TOP_LEFT),
+    ("Top Right", POS_TOP_RIGHT),
+    ("Bottom Left", POS_BOTTOM_LEFT),
+    ("Bottom Right", POS_BOTTOM_RIGHT),
+    ("Draggable", POS_DRAGGABLE),
+)
 
 
 def _hex_to_rgb(h: str) -> tuple[int, int, int]:
@@ -16,12 +27,14 @@ def _load_status_colors() -> dict:
         STATUS_DONE:    _hex_to_rgb(s.get("GREEN")),
         STATUS_WORKING: _hex_to_rgb(s.get("YELLOW")),
         STATUS_WAITING: _hex_to_rgb(s.get("RED")),
+        "no_sessions":  _hex_to_rgb(s.get("GREY")),
     }
 
 _STATUS_COLORS = _load_status_colors()
 
-def _make_icon_image(status: str) -> Image.Image:
-    color = _STATUS_COLORS.get(status, _STATUS_COLORS[STATUS_DONE])
+def _make_icon_image(status: str, has_sessions: bool = True) -> Image.Image:
+    key = status if has_sessions else "no_sessions"
+    color = _STATUS_COLORS.get(key, _STATUS_COLORS[STATUS_DONE])
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -38,6 +51,7 @@ class TrayIcon:
 
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._on_toggle, default=True),
+            pystray.MenuItem("Position", self._build_position_menu()),
             pystray.MenuItem("Reload Style", self._on_reload_style),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._on_quit),
@@ -45,7 +59,7 @@ class TrayIcon:
 
         self._icon = pystray.Icon(
             name="claude_dashboard",
-            icon=_make_icon_image(STATUS_DONE),
+            icon=_make_icon_image(STATUS_DONE, has_sessions=False),
             title="Claude Dashboard",
             menu=menu,
         )
@@ -59,7 +73,21 @@ class TrayIcon:
     def reload_style(self):
         global _STATUS_COLORS
         _STATUS_COLORS = _load_status_colors()
-        self._icon.icon = _make_icon_image(self._monitor.status)
+        self._icon.icon = _make_icon_image(self._monitor.status, bool(self._monitor.sessions))
+
+    def _build_position_menu(self):
+        return pystray.Menu(*(
+            pystray.MenuItem(
+                label,
+                (lambda mode: lambda icon, item: self._on_set_position(mode))(mode),
+                checked=(lambda mode: lambda item: self._overlay._position_mode == mode)(mode),
+                radio=True,
+            )
+            for label, mode in _POSITION_LABELS
+        ))
+
+    def _on_set_position(self, mode):
+        self._overlay.after(0, self._overlay.set_position_mode, mode)
 
     def _on_toggle(self, icon, item):
         self._overlay.after(0, self._overlay.toggle_visible)
@@ -76,7 +104,9 @@ class TrayIcon:
         import time
         while True:
             status = self._monitor.status
-            if status != self._last_status:
-                self._last_status = status
-                self._icon.icon = _make_icon_image(status)
+            has_sessions = bool(self._monitor.sessions)
+            key = (status, has_sessions)
+            if key != self._last_status:
+                self._last_status = key
+                self._icon.icon = _make_icon_image(status, has_sessions)
             time.sleep(2)

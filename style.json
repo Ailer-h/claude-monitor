@@ -4,9 +4,11 @@
     "GREEN": "#138a36",
     "YELLOW": "#ffb620",
     "RED": "#DD1C1A",
+    "GREY": "#5a5a5a",
     "TEXT_PRI": "#f1f1f1",
     "TEXT_DIM": "#cacaca",
     "BAR_BG": "#1a1a1a",
+    "SESSION_BAR": "#d97757",
 
     "FONT": {
         "font-face": "Mozilla Text",
